@@ -1,6 +1,6 @@
 // Parameterized Jenkins job: start an EC2 instance by ID.
-// Works without the "Docker Pipeline" plugin (uses `docker run` + python image).
-// Repo layout: https://github.com/vivek1918/Start_EC2 (Jenkinsfile at repo root).
+// Python runs on the Jenkins agent (see jenkins/Dockerfile for local Docker Jenkins).
+// Repo: https://github.com/vivek1918/Start_EC2
 
 pipeline {
     agent any
@@ -61,19 +61,13 @@ pipeline {
                         if [ "${DRY_RUN}" = "true" ]; then
                           DRY_FLAG="--dry-run"
                         fi
-                        if ! command -v docker >/dev/null 2>&1; then
-                          echo "docker CLI not found on Jenkins agent. Install Docker Pipeline plugin OR use jenkins/docker-compose with the provided Dockerfile." >&2
-                          exit 1
-                        fi
-                        docker run --rm \
-                          -e AWS_ACCESS_KEY_ID \
-                          -e AWS_SECRET_ACCESS_KEY \
-                          -e INSTANCE_ID="${INSTANCE_ID}" \
-                          -e AWS_REGION="${AWS_REGION}" \
-                          -e DRY_RUN="${DRY_RUN}" \
-                          -v "${WORKSPACE}:/work" -w /work \
-                          python:3.12-slim \
-                          bash -lc 'pip install -q -r requirements.txt && DRY_FLAG="" && [ "$DRY_RUN" = "true" ] && DRY_FLAG="--dry-run"; python start_ec2_instance.py --instance-id "$INSTANCE_ID" --region "$AWS_REGION" $DRY_FLAG'
+                        python3 -m venv .venv
+                        . .venv/bin/activate
+                        pip install -q -r requirements.txt
+                        python start_ec2_instance.py \
+                          --instance-id "${INSTANCE_ID}" \
+                          --region "${AWS_REGION}" \
+                          ${DRY_FLAG}
                     '''
                 }
             }
