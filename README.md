@@ -122,9 +122,31 @@ cd c:\workspace\devops\ec2-start-utility\jenkins
 4. **New Item → Pipeline** → name **`Start EC2 Instance`**:
    - **Pipeline → Definition:** Pipeline script from SCM
    - **SCM:** Git
-   - **Repository URL:** `file:///repo`
-   - **Branch:** `*/master` (default after `setup-jenkins.ps1`; run `git branch` in `c:\workspace\devops` if unsure)
-   - **Script Path:** `ec2-start-utility/Jenkinsfile`
+   - **Script Path:** `Jenkinsfile` for [Start_EC2](https://github.com/vivek1918/Start_EC2) (files at repo root). Use `ec2-start-utility/Jenkinsfile` only if your git root is the parent `devops` folder.
+
+   **Option A — code on GitHub/GitLab (branch `main`)** *(use this if you pushed your repo)*:
+
+   | Field | Value |
+   | --- | --- |
+   | Repository URL | e.g. `https://github.com/vivek1918/Start_EC2.git` |
+   | Credentials | Add if the repo is private (PAT or username/password) |
+   | Branch Specifier | **`*/main`** |
+
+   **Option B — local Docker only (`file:///repo`)**:
+
+   | Field | Value |
+   | --- | --- |
+   | Repository URL | `file:///repo` (bare clone from `setup-jenkins.ps1`) |
+   | Branch Specifier | **`*/main`** (must match `git branch` in `c:\workspace\devops`) |
+
+   If you see `couldn't find remote ref refs/heads/main`, the job branch does not match the repo. For Option B run `.\sync-bare-repo.ps1`. For Option A confirm the default branch on GitHub is `main`.
+
+   After local code changes (Option B only), commit then:
+
+```powershell
+cd c:\workspace\devops\ec2-start-utility\jenkins
+.\sync-bare-repo.ps1
+```
 
 5. **Build with Parameters**:
    - `INSTANCE_ID` — your `i-…` id

@@ -12,13 +12,15 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path (Join-Path $RepoRoot ".git"))) {
     Write-Host "Initializing git repo (required for Jenkins Pipeline from SCM)..."
     Push-Location $RepoRoot
-    git init
+    git init -b main
     git add .
     git commit -m "Initial commit for Jenkins pipeline"
     Pop-Location
 } else {
     Write-Host "Git repo already exists at $RepoRoot"
 }
+
+& (Join-Path $JenkinsDir "sync-bare-repo.ps1")
 
 Push-Location $JenkinsDir
 docker compose pull
@@ -27,7 +29,8 @@ Pop-Location
 
 Write-Host ""
 Write-Host "Jenkins UI: http://localhost:8080"
-Write-Host "First-time unlock password:"
-docker exec ec2-start-jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+Write-Host "Unlock password: docker exec ec2-start-jenkins cat /var/jenkins_home/secrets/initialAdminPassword"
 Write-Host ""
-Write-Host "Next: see README section 'Local Jenkins (Docker on Windows)'."
+Write-Host "Jenkins job Git URL: file:///repo  Branch: */main  Script: ec2-start-utility/Jenkinsfile"
+Write-Host "After code changes, run: .\sync-bare-repo.ps1"
+Write-Host "See README section 'Local Jenkins (Docker on Windows)'."

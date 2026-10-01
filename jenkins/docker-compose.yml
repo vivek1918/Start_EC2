@@ -1,6 +1,7 @@
 services:
   jenkins:
-    image: jenkins/jenkins:lts
+    build: .
+    image: ec2-start-jenkins:local
     container_name: ec2-start-jenkins
     user: root
     ports:
@@ -8,7 +9,7 @@ services:
       - "50000:50000"
     volumes:
       - jenkins_home:/var/jenkins_home
-      - ../../:/repo:ro
+      - ./repo-bare:/repo
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 

@@ -1,9 +1,9 @@
 // Parameterized Jenkins job: start an EC2 instance by ID.
-// End users fill INSTANCE_ID (and optionally AWS_REGION) then click Build.
-// Python runs in a Docker agent (works with stock jenkins/jenkins:lts; no apt install on controller).
+// Works without the "Docker Pipeline" plugin (uses `docker run` + python image).
+// Repo layout: https://github.com/vivek1918/Start_EC2 (Jenkinsfile at repo root).
 
 pipeline {
-    agent none
+    agent any
 
     parameters {
         string(
@@ -35,11 +35,10 @@ pipeline {
 
     stages {
         stage('Validate input') {
-            agent any
             steps {
                 script {
                     if (!params.INSTANCE_ID?.trim()) {
-                        error('INSTANCE_ID is required.')
+                        error('INSTANCE_ID is required. Use Build with Parameters and set INSTANCE_ID.')
                     }
                     echo "Instance ID: ${params.INSTANCE_ID}"
                     echo "Region:      ${params.AWS_REGION}"
@@ -48,39 +47,34 @@ pipeline {
             }
         }
 
-        stage('Checkout') {
-            agent any
+        stage('Start EC2 instance') {
             steps {
                 checkout scm
-            }
-        }
-
-        stage('Start EC2 instance') {
-            agent {
-                docker {
-                    image 'python:3.12-slim'
-                    reuseNode true
-                }
-            }
-            steps {
-                dir('ec2-start-utility') {
-                    withCredentials([usernamePassword(
-                        credentialsId: 'aws-ec2-start',
-                        usernameVariable: 'AWS_ACCESS_KEY_ID',
-                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                    )]) {
-                        sh '''
-                            pip install -q -r requirements.txt
-                            DRY_FLAG=""
-                            if [ "${DRY_RUN}" = "true" ]; then
-                              DRY_FLAG="--dry-run"
-                            fi
-                            python start_ec2_instance.py \
-                              --instance-id "${INSTANCE_ID}" \
-                              --region "${AWS_REGION}" \
-                              ${DRY_FLAG}
-                        '''
-                    }
+                withCredentials([usernamePassword(
+                    credentialsId: 'aws-ec2-start',
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    sh '''#!/usr/bin/env bash
+                        set -euo pipefail
+                        DRY_FLAG=""
+                        if [ "${DRY_RUN}" = "true" ]; then
+                          DRY_FLAG="--dry-run"
+                        fi
+                        if ! command -v docker >/dev/null 2>&1; then
+                          echo "docker CLI not found on Jenkins agent. Install Docker Pipeline plugin OR use jenkins/docker-compose with the provided Dockerfile." >&2
+                          exit 1
+                        fi
+                        docker run --rm \
+                          -e AWS_ACCESS_KEY_ID \
+                          -e AWS_SECRET_ACCESS_KEY \
+                          -e INSTANCE_ID="${INSTANCE_ID}" \
+                          -e AWS_REGION="${AWS_REGION}" \
+                          -e DRY_RUN="${DRY_RUN}" \
+                          -v "${WORKSPACE}:/work" -w /work \
+                          python:3.12-slim \
+                          bash -lc 'pip install -q -r requirements.txt && DRY_FLAG="" && [ "$DRY_RUN" = "true" ] && DRY_FLAG="--dry-run"; python start_ec2_instance.py --instance-id "$INSTANCE_ID" --region "$AWS_REGION" $DRY_FLAG'
+                    '''
                 }
             }
         }
