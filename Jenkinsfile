@@ -1,5 +1,3 @@
-// App team: provide URL or IP + region. DevOps can still pass INSTANCE_ID via optional override.
-
 pipeline {
     agent any
 
@@ -7,25 +5,22 @@ pipeline {
         string(
             name: 'APP_URL_OR_IP',
             defaultValue: '',
-            description: 'App URL (https://host/...), hostname, or IPv4 — used to find and start the EC2 instance'
+            description: 'Enter the application URL or IPv4 address'
         )
-        string(
-            name: 'INSTANCE_ID',
-            defaultValue: '',
-            description: 'Optional: skip URL/IP lookup and use this instance ID (DevOps only)'
-        )
+
         choice(
             name: 'AWS_REGION',
             choices: [
                 'ap-southeast-2',
                 'ap-south-1'
             ],
-            description: 'AWS region where the instance lives'
+            description: 'AWS region where the application EC2 instance is running'
         )
+
         booleanParam(
             name: 'DRY_RUN',
             defaultValue: false,
-            description: 'Resolve target only; do not start the instance'
+            description: 'Find the EC2 instance but do not start it'
         )
     }
 
@@ -40,28 +35,23 @@ pipeline {
     }
 
     stages {
-        stage('Validate input') {
+
+        stage('Validate Input') {
             steps {
                 script {
-                    def hasId = params.INSTANCE_ID?.trim()
-                    def hasTarget = params.APP_URL_OR_IP?.trim()
-                    if (!hasId && !hasTarget) {
-                        error('Set APP_URL_OR_IP (for app team) or INSTANCE_ID (DevOps override).')
+                    if (!params.APP_URL_OR_IP?.trim()) {
+                        error('Application URL or IP address is required.')
                     }
-                    if (hasId && hasTarget) {
-                        error('Set only one of APP_URL_OR_IP or INSTANCE_ID, not both.')
-                    }
-                    echo "App URL/IP:  ${params.APP_URL_OR_IP ?: '(not set)'}"
-                    echo "Instance ID: ${params.INSTANCE_ID ?: '(not set)'}"
-                    echo "Region:      ${params.AWS_REGION}"
-                    echo "Dry run:     ${params.DRY_RUN}"
+
+                    echo "Application URL/IP: ${params.APP_URL_OR_IP}"
+                    echo "AWS Region: ${params.AWS_REGION}"
+                    echo "Dry Run: ${params.DRY_RUN}"
                 }
             }
         }
 
-        stage('Start EC2 instance') {
+        stage('Start EC2 Instance') {
             steps {
-                checkout scm
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'aws-ec2-start',
@@ -71,24 +61,22 @@ pipeline {
                 ]) {
                     sh '''#!/usr/bin/env bash
                         set -euo pipefail
+
                         python3 -m venv .venv
                         . .venv/bin/activate
+
                         pip install -q -r requirements.txt
+
                         DRY_FLAG=""
+
                         if [ "${DRY_RUN}" = "true" ]; then
-                          DRY_FLAG="--dry-run"
+                            DRY_FLAG="--dry-run"
                         fi
-                        if [ -n "${INSTANCE_ID}" ]; then
-                          python start_ec2_instance.py \
-                            --instance-id "${INSTANCE_ID}" \
-                            --region "${AWS_REGION}" \
-                            ${DRY_FLAG}
-                        else
-                          python start_ec2_instance.py \
+
+                        python start_ec2_instance.py \
                             --target "${APP_URL_OR_IP}" \
                             --region "${AWS_REGION}" \
                             ${DRY_FLAG}
-                        fi
                     '''
                 }
             }
@@ -97,10 +85,11 @@ pipeline {
 
     post {
         success {
-            echo 'EC2 start request completed.'
+            echo 'EC2 start request completed successfully.'
         }
+
         failure {
-            echo 'Failed to start instance. Check the console log.'
+            echo 'Failed to start the EC2 instance. Check the console output.'
         }
     }
 }
