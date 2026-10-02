@@ -8,15 +8,6 @@ pipeline {
             description: 'Enter the application URL or IPv4 address'
         )
 
-        choice(
-            name: 'AWS_REGION',
-            choices: [
-                'ap-southeast-2',
-                'ap-south-1'
-            ],
-            description: 'AWS region where the application EC2 instance is running'
-        )
-
         booleanParam(
             name: 'DRY_RUN',
             defaultValue: false,
@@ -32,6 +23,7 @@ pipeline {
 
     environment {
         PYTHONUNBUFFERED = '1'
+        AWS_DEFAULT_REGION = 'ap-southeast-2'
     }
 
     stages {
@@ -44,7 +36,7 @@ pipeline {
                     }
 
                     echo "Application URL/IP: ${params.APP_URL_OR_IP}"
-                    echo "AWS Region: ${params.AWS_REGION}"
+                    echo "AWS Region: ${env.AWS_DEFAULT_REGION}"
                     echo "Dry Run: ${params.DRY_RUN}"
                 }
             }
@@ -75,7 +67,6 @@ pipeline {
 
                         python start_ec2_instance.py \
                             --target "${APP_URL_OR_IP}" \
-                            --region "${AWS_REGION}" \
                             ${DRY_FLAG}
                     '''
                 }
