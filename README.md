@@ -1,15 +1,15 @@
 # Start EC2 instance (Jenkins utility)
 
-End-user utility: enter an EC2 instance ID in Jenkins, click Build, and the instance is started (`running`).
+End-user utility: enter an **app URL or IP** (or instance ID for DevOps) in Jenkins, click Build, and the matching EC2 instance is started (`running`).
 
-You do **not** need to know DevOps to use it after someone sets Jenkins and AWS up once.
+App teams do **not** need the instance ID if the URL/IP resolves to that instance’s address in AWS.
 
 ## What you get
 
 | File | Purpose |
 | --- | --- |
 | `start_ec2_instance.py` | Starts the instance and waits until state is `running` |
-| `Jenkinsfile` | Jenkins form: Instance ID, region, optional dry run |
+| `Jenkinsfile` | Jenkins form: APP URL/IP, region, optional dry run |
 | `requirements.txt` | Python library (`boto3`) |
 
 ## If you have no AWS account or Jenkins yet
@@ -18,8 +18,8 @@ This script talks to **your** AWS account. It cannot start machines without cred
 
 Ask your company admin (or create a personal AWS account for learning) for:
 
-1. An **EC2 instance ID** that you are allowed to start (looks like `i-0123456789abcdef0`)
-2. The **AWS region** (India Mumbai is often `ap-south-1`)
+1. The **app URL or IP** you use to reach the server (or an instance ID for admins)
+2. The **AWS region** where that instance runs (e.g. `ap-south-1`, `ap-southeast-2`)
 3. **AWS access keys** with permission to start that instance, **or** a Jenkins server that already has an IAM role
 
 Minimum IAM permission for the user/role Jenkins uses:
@@ -54,14 +54,24 @@ export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 export AWS_DEFAULT_REGION=ap-south-1
 
-python start_ec2_instance.py --instance-id i-0123456789abcdef0
+python start_ec2_instance.py --target https://myapp.example.com --region ap-south-1
+python start_ec2_instance.py --target 203.0.113.10 --region ap-south-1
+python start_ec2_instance.py --instance-id i-0123456789abcdef0 --region ap-south-1
 ```
 
-Check arguments without starting anything:
+Check resolution without starting:
 
 ```bash
-python start_ec2_instance.py --instance-id i-0123456789abcdef0 --dry-run
+python start_ec2_instance.py --target 203.0.113.10 --region ap-south-1 --dry-run
 ```
+
+### How URL/IP lookup works
+
+1. **URL or hostname** → DNS → IPv4 address.
+2. **IPv4** → EC2 `DescribeInstances` filter (public or private IP in the chosen **region**).
+3. **One** matching instance → start it. Zero or many matches → clear error.
+
+**Limits:** URLs that point to a **load balancer, CloudFront, or API Gateway** usually do **not** map to one EC2 instance. For those, DevOps must use **instance ID** or register a stable hostname that points at the instance’s IP.
 
 Windows PowerShell env vars:
 
@@ -78,8 +88,9 @@ python start_ec2_instance.py --instance-id i-0123456789abcdef0
 2. Open the job **Start EC2 Instance**.
 3. Click **Build with Parameters**.
 4. Fill:
-   - `INSTANCE_ID` — required
-   - `AWS_REGION` — default `ap-south-1`
+   - `APP_URL_OR_IP` — e.g. `https://dev.mycompany.com` or `203.0.113.10` (app team)
+   - `INSTANCE_ID` — leave empty unless DevOps overrides lookup
+   - `AWS_REGION` — region where the instance lives
    - `DRY_RUN` — leave unchecked to actually start
 5. Click **Build**.
 6. Open **Console Output** to see previous state → start → `running`, plus IP if AWS returns one.
