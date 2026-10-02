@@ -1,0 +1,28 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets and keys (never commit)
+*.pem
+.env
+.env.*
+!.env.example
+practice-instance.local.env
+*credentials*
+.aws/
+
+# Jenkins local Docker
+jenkins/repo-bare/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
