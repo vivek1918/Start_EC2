@@ -32,7 +32,8 @@ Minimum IAM permission for the user/role Jenkins uses:
       "Effect": "Allow",
       "Action": [
         "ec2:StartInstances",
-        "ec2:DescribeInstances"
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces"
       ],
       "Resource": "*"
     }
@@ -67,11 +68,16 @@ python start_ec2_instance.py --target 203.0.113.10 --region ap-south-1 --dry-run
 
 ### How URL/IP lookup works
 
-1. **URL or hostname** → DNS → IPv4 address.
-2. **IPv4** → EC2 `DescribeInstances` filter (public or private IP in the chosen **region**).
-3. **One** matching instance → start it. Zero or many matches → clear error.
+**IP address input:** matched against EC2 public or private IPs in the chosen **region** (`DescribeInstances`).
 
-**Limits:** URLs that point to a **load balancer, CloudFront, or API Gateway** usually do **not** map to one EC2 instance. For those, DevOps must use **instance ID** or register a stable hostname that points at the instance’s IP.
+**URL or hostname input:**
+
+1. DNS lookup. If the name is a CNAME to an AWS managed service (`*.elb.amazonaws.com`, `*.cloudfront.net`, API Gateway, Global Accelerator, App Runner, Amplify, S3 website, Lambda URL), it is rejected.
+2. Only **public** IPs are used; a URL resolving only to private IPs is rejected.
+3. Each public IP is looked up with `DescribeNetworkInterfaces`. The IP must belong to a regular network interface attached to an EC2 instance. IPs owned by an **ALB, NLB, Classic/Gateway LB, NAT gateway**, or other AWS managed interface are rejected, as are IPs not found in the account/region (e.g. CloudFront, external hosting).
+4. Exactly **one** EC2 instance → start it.
+
+**Limits:** auto-assigned public IPs are released when an instance stops, so a URL only works for a stopped instance if its DNS points at an **Elastic IP**. Otherwise use the instance ID.
 
 Windows PowerShell env vars:
 
