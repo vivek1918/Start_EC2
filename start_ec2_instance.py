@@ -2,7 +2,13 @@
 
 """
 Start an AWS EC2 instance using an application URL, hostname, IPv4 address,
-or directly using an EC2 instance ID.
+or directly using an EC2 instance ID, then wait until the application on
+that instance answers its health endpoint with HTTP 200.
+
+Success means: EC2 state is running AND GET <target>/health returns 200.
+The application is expected to start on its own at boot (for example a
+systemd service on Linux); this script only verifies it, so it does not
+depend on the instance's operating system.
 
 Examples:
 
@@ -15,6 +21,9 @@ Examples:
     python start_ec2_instance.py --instance-id i-0123456789abcdef0 --region ap-south-1
 
     python start_ec2_instance.py --target 203.0.113.10 --dry-run
+
+    python start_ec2_instance.py --target 203.0.113.10 \
+        --health-port 8080 --health-timeout 600 --health-interval 15
 """
 
 from __future__ import annotations
@@ -24,6 +33,9 @@ import ipaddress
 import re
 import socket
 import sys
+import time
+import urllib.error
+import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
@@ -86,8 +98,9 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help=(
-            "Resolve and validate the target but do not start "
-            "the EC2 instance."
+            "Resolve and validate the target and print the planned "
+            "actions, without starting the EC2 instance or checking "
+            "application health."
         ),
     )
 
@@ -99,6 +112,39 @@ def parse_args() -> argparse.Namespace:
             "Maximum number of seconds to wait for the instance "
             "to become running. Default: 300."
         ),
+    )
+
+    parser.add_argument(
+        "--health-path",
+        default="/health",
+        help="Application health endpoint path. Default: /health.",
+    )
+
+    parser.add_argument(
+        "--health-port",
+        type=int,
+        default=None,
+        help=(
+            "Port for the health check. Defaults to the port in the "
+            "target URL, or the scheme default (80/443)."
+        ),
+    )
+
+    parser.add_argument(
+        "--health-timeout",
+        type=int,
+        default=300,
+        help=(
+            "Maximum number of seconds to wait for the application "
+            "health check to return HTTP 200. Default: 300."
+        ),
+    )
+
+    parser.add_argument(
+        "--health-interval",
+        type=int,
+        default=10,
+        help="Seconds between health check attempts. Default: 10.",
     )
 
     return parser.parse_args()
@@ -490,12 +536,119 @@ def instance_state_name(
     )
 
 
+def build_health_url(
+    target: str | None,
+    instance: dict[str, Any],
+    health_path: str,
+    health_port: int | None,
+) -> str | None:
+    """
+    Build the application health URL.
+
+    URL/IP target: keep the target's scheme, host, and port
+    (http://<APP_URL_OR_IP>/health). Instance ID target: use the
+    instance's public IP, falling back to its private IP.
+
+    Returns None when there is no address to check yet.
+    """
+
+    if target:
+        value = target.strip()
+        parsed = urlparse(value if "://" in value else f"//{value}")
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname
+        port = health_port or parsed.port
+
+    else:
+        scheme = "http"
+        host = (
+            instance.get("PublicIpAddress")
+            or instance.get("PrivateIpAddress")
+        )
+        port = health_port
+
+    if not host:
+        return None
+
+    netloc = f"{host}:{port}" if port else host
+    path = health_path if health_path.startswith("/") else f"/{health_path}"
+
+    return f"{scheme}://{netloc}{path}"
+
+
+def check_health_once(url: str, request_timeout: float) -> tuple[bool, str]:
+    """
+    Make a single health request. Returns (healthy, description).
+    """
+
+    try:
+        with urllib.request.urlopen(url, timeout=request_timeout) as response:
+            status = response.getcode()
+
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+
+    except urllib.error.URLError as exc:
+        return False, str(exc.reason)
+
+    except (OSError, ValueError) as exc:
+        return False, str(exc) or exc.__class__.__name__
+
+    if status == 200:
+        return True, "HTTP 200"
+
+    return False, f"HTTP {status}"
+
+
+def wait_for_app_health(url: str, timeout: int, interval: int) -> None:
+    """
+    Poll the health URL until it returns HTTP 200 or the timeout expires.
+    """
+
+    print(f"Health check: {url}")
+    print(f"Timeout: {timeout}s, retry interval: {interval}s")
+
+    deadline = time.monotonic() + timeout
+    attempt = 0
+
+    while True:
+        attempt += 1
+
+        healthy, detail = check_health_once(
+            url,
+            request_timeout=min(interval, 10),
+        )
+
+        if healthy:
+            print(f"Attempt {attempt}: {detail}")
+            return
+
+        print(f"Attempt {attempt}: Application not ready ({detail})")
+
+        remaining = deadline - time.monotonic()
+
+        if remaining <= 0:
+            raise RuntimeError(
+                f"Application did not become healthy within {timeout}s. "
+                f"{url} last returned: {detail}. The EC2 instance is "
+                "running, but the application is not. Check that the "
+                "application service is enabled at boot and that the "
+                "security group allows the health check port."
+            )
+
+        time.sleep(min(interval, remaining))
+
+
 def start_instance(
     instance_id: str | None,
     target: str | None,
     region: str | None,
     dry_run: bool,
     wait_timeout: int,
+    health_path: str,
+    health_port: int | None,
+    health_timeout: int,
+    health_interval: int,
 ) -> int:
 
     try:
@@ -517,10 +670,11 @@ def start_instance(
 
         return 2
 
-    # Validate timeout
-    if wait_timeout <= 0:
+    # Validate timeouts
+    if wait_timeout <= 0 or health_timeout <= 0 or health_interval <= 0:
         print(
-            "Wait timeout must be greater than 0 seconds.",
+            "Wait timeout, health timeout, and health interval must be "
+            "greater than 0 seconds.",
             file=sys.stderr,
         )
 
@@ -555,15 +709,15 @@ def start_instance(
         # Resolve target -> EC2 instance ID
         # ---------------------------------------------------------
 
+        print("Finding EC2 instance from APP_URL_OR_IP...")
+
         resolved_id = resolve_instance_id(
             ec2=ec2,
             instance_id=instance_id,
             target=target,
         )
 
-        print(
-            f"Target resolved to instance: {resolved_id}"
-        )
+        print(f"EC2 instance found: {resolved_id}")
 
         # ---------------------------------------------------------
         # Get current instance details
@@ -584,22 +738,12 @@ def start_instance(
         )
 
         # ---------------------------------------------------------
-        # Already running
-        # ---------------------------------------------------------
-
-        if current_state == "running":
-            print(
-                "Instance is already running. "
-                "No start required."
-            )
-
-            return 0
-
-        # ---------------------------------------------------------
         # Validate state
         # ---------------------------------------------------------
 
         if current_state not in {
+            "running",
+            "pending",
             "stopped",
             "stopping",
         }:
@@ -612,22 +756,42 @@ def start_instance(
 
             return 1
 
+        needs_start = current_state in {"stopped", "stopping"}
+
         # ---------------------------------------------------------
-        # Dry run
+        # Dry run: report the plan, change nothing, check nothing
         # ---------------------------------------------------------
 
         if dry_run:
-            print(
-                "Dry run enabled."
-            )
+            planned_url = build_health_url(
+                target,
+                instance,
+                health_path,
+                health_port,
+            ) or f"http://<instance IP>{health_path}"
+
+            print("")
+            print("DRY RUN - no changes will be made. Planned actions:")
+
+            if current_state == "stopping":
+                print("  - Wait for the instance to finish stopping")
+
+            if needs_start:
+                print(f"  - Start EC2 instance {resolved_id}")
+                print("  - Wait for EC2 instance to become running")
+            elif current_state == "pending":
+                print("  - Wait for EC2 instance to become running")
+            else:
+                print("  - Skip start (instance is already running)")
 
             print(
-                f"Instance {resolved_id} is currently "
-                f"'{current_state}'."
+                f"  - Poll {planned_url} every {health_interval}s "
+                f"for up to {health_timeout}s until HTTP 200"
             )
-
+            print("")
             print(
-                "No StartInstances API call will be made."
+                "Dry run complete. EC2 was not started and the "
+                "application health was NOT checked."
             )
 
             return 0
@@ -669,64 +833,66 @@ def start_instance(
         # Start instance
         # ---------------------------------------------------------
 
-        print(
-            f"Starting instance {resolved_id}..."
-        )
+        if needs_start:
 
-        start_response = ec2.start_instances(
-            InstanceIds=[resolved_id]
-        )
+            print("Starting EC2 instance...")
 
-        starting_states = (
-            start_response.get(
-                "StartingInstances"
-            )
-            or []
-        )
-
-        if starting_states:
-
-            previous = (
-                starting_states[0]
-                .get("PreviousState", {})
-                .get("Name")
+            start_response = ec2.start_instances(
+                InstanceIds=[resolved_id]
             )
 
-            current = (
-                starting_states[0]
-                .get("CurrentState", {})
-                .get("Name")
+            starting_states = (
+                start_response.get(
+                    "StartingInstances"
+                )
+                or []
             )
 
-            print(
-                "Start requested. "
-                f"Previous state: {previous}. "
-                f"Current state: {current}"
-            )
+            if starting_states:
+
+                previous = (
+                    starting_states[0]
+                    .get("PreviousState", {})
+                    .get("Name")
+                )
+
+                current = (
+                    starting_states[0]
+                    .get("CurrentState", {})
+                    .get("Name")
+                )
+
+                print(
+                    "Start requested. "
+                    f"Previous state: {previous}. "
+                    f"Current state: {current}"
+                )
+
+        elif current_state == "running":
+            print("EC2 instance is already running. No start required.")
 
         # ---------------------------------------------------------
         # Wait until running
         # ---------------------------------------------------------
 
-        print(
-            f"Waiting for instance {resolved_id} "
-            "to become running..."
-        )
+        if current_state != "running":
 
-        waiter = ec2.get_waiter(
-            "instance_running"
-        )
+            print("Waiting for EC2 instance to become running...")
 
-        waiter.wait(
-            InstanceIds=[resolved_id],
-            WaiterConfig={
-                "Delay": 15,
-                "MaxAttempts": max(
-                    1,
-                    wait_timeout // 15,
-                ),
-            },
-        )
+            waiter = ec2.get_waiter(
+                "instance_running"
+            )
+
+            waiter.wait(
+                InstanceIds=[resolved_id],
+                WaiterConfig={
+                    "Delay": 15,
+                    "MaxAttempts": max(
+                        1,
+                        wait_timeout // 15,
+                    ),
+                },
+            )
 
         # ---------------------------------------------------------
         # Verify final state
@@ -741,10 +907,16 @@ def start_instance(
             instance
         )
 
-        print(
-            f"Instance {resolved_id} is now "
-            f"{final_state}."
-        )
+        if final_state != "running":
+            print(
+                f"EC2 instance did not reach the running state "
+                f"(current state: {final_state}).",
+                file=sys.stderr,
+            )
+
+            return 1
+
+        print("EC2 instance is running.")
 
         # ---------------------------------------------------------
         # Display IP information
@@ -769,22 +941,36 @@ def start_instance(
             )
 
         # ---------------------------------------------------------
-        # Final result
+        # Wait for the application (EC2 running != app running)
         # ---------------------------------------------------------
 
-        if final_state == "running":
-            print(
-                "EC2 instance started successfully."
-            )
-
-            return 0
-
-        print(
-            "EC2 instance did not reach the running state.",
-            file=sys.stderr,
+        health_url = build_health_url(
+            target,
+            instance,
+            health_path,
+            health_port,
         )
 
-        return 1
+        if not health_url:
+            raise RuntimeError(
+                f"Instance {resolved_id} has no IP address to run the "
+                "application health check against."
+            )
+
+        print("")
+        print("Waiting for application to become available...")
+
+        wait_for_app_health(
+            health_url,
+            timeout=health_timeout,
+            interval=health_interval,
+        )
+
+        print("")
+        print("Application is healthy.")
+        print("EC2 startup completed successfully.")
+
+        return 0
 
     except NoCredentialsError:
 
@@ -865,6 +1051,10 @@ def main() -> int:
         region=args.region,
         dry_run=args.dry_run,
         wait_timeout=args.wait_timeout,
+        health_path=args.health_path,
+        health_port=args.health_port,
+        health_timeout=args.health_timeout,
+        health_interval=args.health_interval,
     )
 
 

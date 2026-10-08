@@ -1,6 +1,8 @@
 # Start EC2 instance (Jenkins utility)
 
-End-user utility: enter an **app URL or IP** (or instance ID for DevOps) in Jenkins, click Build, and the matching EC2 instance is started (`running`).
+End-user utility: enter an **app URL or IP** (or instance ID for DevOps) in Jenkins, click Build, and the matching EC2 instance is started and its application is verified healthy.
+
+Success means **EC2 = `running` AND `GET http://<APP_URL_OR_IP>/health` = HTTP 200**. An instance that is running but whose application never answers fails the build.
 
 App teams do **not** need the instance ID if the URL/IP resolves to that instance’s address in AWS.
 
@@ -8,9 +10,54 @@ App teams do **not** need the instance ID if the URL/IP resolves to that instanc
 
 | File | Purpose |
 | --- | --- |
-| `start_ec2_instance.py` | Starts the instance and waits until state is `running` |
-| `Jenkinsfile` | Jenkins form: APP URL/IP, region, optional dry run |
+| `start_ec2_instance.py` | Starts the instance, waits for `running`, then waits for `/health` to return HTTP 200 |
+| `Jenkinsfile` | Jenkins form: APP URL/IP and optional dry run |
 | `requirements.txt` | Python library (`boto3`) |
+| `sample-app/` | Small Flask test app with `GET /health` → `{"status": "UP"}` |
+| `sample-app/deploy/linux/` | systemd unit + installer so the app starts on every boot |
+
+## Application health check
+
+After EC2 reports `running`, the script polls the application:
+
+| Setting | CLI flag | Jenkins (`environment` block) | Default |
+| --- | --- | --- | --- |
+| Path | `--health-path` | `HEALTH_PATH` | `/health` |
+| Timeout (seconds) | `--health-timeout` | `HEALTH_TIMEOUT` | `300` |
+| Retry interval (seconds) | `--health-interval` | `HEALTH_INTERVAL` | `10` |
+| Port | `--health-port` | not set | port in the URL, else 80/443 |
+
+The health URL keeps the scheme, host, and port of `APP_URL_OR_IP` (`https://app.example.com:8443` → `https://app.example.com:8443/health`, `203.0.113.10` → `http://203.0.113.10/health`). With `--instance-id`, the instance's public IP is used.
+
+The script does **not** start the application itself. The application must start on its own when the instance boots, using whatever mechanism its OS provides (systemd on Linux; e.g. a Windows service on Windows). That keeps the script and Jenkins job OS-independent: no OS parameter is needed.
+
+`DRY_RUN` prints the planned actions (start, wait, which health URL would be polled) and exits without starting EC2 or calling the health endpoint.
+
+## Sample application (Linux, systemd)
+
+One-time setup on the test instance:
+
+1. **Security group:** allow inbound TCP **80** (or your chosen port) from the machine running Jenkins/the script.
+2. **Elastic IP (recommended):** auto-assigned public IPs change on stop/start; an Elastic IP keeps `APP_URL_OR_IP` stable.
+3. **Copy and install** (from PowerShell on your PC; user is `ec2-user` on Amazon Linux, `ubuntu` on Ubuntu):
+
+```powershell
+cd c:\workspace\devops\ec2-start-utility
+scp -i C:\path\to\key.pem -r sample-app ec2-user@<PUBLIC_IP>:~/
+ssh -i C:\path\to\key.pem ec2-user@<PUBLIC_IP> "sudo bash ~/sample-app/deploy/linux/install.sh 80"
+```
+
+The installer installs Python if needed, puts the app in `/opt/sample-app` (virtualenv + gunicorn), writes the port to `/etc/sample-app/sample-app.env`, enables the `sample-app` systemd service at boot, starts it, and verifies `http://127.0.0.1:<port>/health` locally. Re-run it to update the app or change the port.
+
+Useful commands on the instance:
+
+```bash
+systemctl status sample-app
+journalctl -u sample-app -f
+curl http://127.0.0.1/health
+```
+
+4. **Verify auto-start:** stop the instance in the AWS console, then run the Jenkins job (or the script). It should start EC2 and pass the health check without anyone logging in to start the app.
 
 ## If you have no AWS account or Jenkins yet
 
@@ -99,7 +146,7 @@ python start_ec2_instance.py --instance-id i-0123456789abcdef0
    - `AWS_REGION` — region where the instance lives
    - `DRY_RUN` — leave unchecked to actually start
 5. Click **Build**.
-6. Open **Console Output** to see previous state → start → `running`, plus IP if AWS returns one.
+6. Open **Console Output** to see previous state → start → `running` → health check attempts → `Application is healthy.` The build fails if `/health` does not return HTTP 200 within the timeout.
 
 ### One-time Jenkins job setup (admin)
 
@@ -183,10 +230,10 @@ docker compose down
 
 ## What the script does
 
-1. Checks the instance ID format.
+1. Finds the EC2 instance from `APP_URL_OR_IP` (or validates the instance ID).
 2. Reads current EC2 state.
-3. If already `running`, exits successfully.
-4. If `stopped` (or finishes `stopping`), calls `StartInstances`.
-5. Waits until AWS reports `running`.
+3. If `stopped` (or finishes `stopping`), calls `StartInstances`; if already `running`, skips the start.
+4. Waits until AWS reports `running`.
+5. Polls `<APP_URL_OR_IP>/health` until HTTP 200, or fails after the health timeout.
 
-It does not create instances, stop them, or change security groups.
+It does not create instances, stop them, change security groups, or start the application.

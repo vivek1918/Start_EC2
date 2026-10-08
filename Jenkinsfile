@@ -11,19 +11,25 @@ pipeline {
         booleanParam(
             name: 'DRY_RUN',
             defaultValue: false,
-            description: 'Find the EC2 instance but do not start it'
+            description: 'Find the EC2 instance and show planned actions, but do not start it or check the application'
         )
     }
 
     options {
         timestamps()
-        timeout(time: 15, unit: 'MINUTES')
+        timeout(time: 20, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '30'))
     }
 
     environment {
         PYTHONUNBUFFERED = '1'
         AWS_DEFAULT_REGION = 'ap-southeast-2'
+
+        // Application health check: success requires HTTP 200 from
+        // http://<APP_URL_OR_IP><HEALTH_PATH> before HEALTH_TIMEOUT seconds.
+        HEALTH_PATH = '/health'
+        HEALTH_TIMEOUT = '300'
+        HEALTH_INTERVAL = '10'
     }
 
     stages {
@@ -38,11 +44,12 @@ pipeline {
                     echo "Application URL/IP: ${params.APP_URL_OR_IP}"
                     echo "AWS Region: ${env.AWS_DEFAULT_REGION}"
                     echo "Dry Run: ${params.DRY_RUN}"
+                    echo "Health check: ${env.HEALTH_PATH} (timeout ${env.HEALTH_TIMEOUT}s, every ${env.HEALTH_INTERVAL}s)"
                 }
             }
         }
 
-        stage('Start EC2 Instance') {
+        stage('Start EC2 and Verify Application') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -67,6 +74,9 @@ pipeline {
 
                         python start_ec2_instance.py \
                             --target "${APP_URL_OR_IP}" \
+                            --health-path "${HEALTH_PATH}" \
+                            --health-timeout "${HEALTH_TIMEOUT}" \
+                            --health-interval "${HEALTH_INTERVAL}" \
                             ${DRY_FLAG}
                     '''
                 }
@@ -76,11 +86,17 @@ pipeline {
 
     post {
         success {
-            echo 'EC2 start request completed successfully.'
+            script {
+                if (params.DRY_RUN) {
+                    echo 'Dry run completed. No EC2 or application changes were made.'
+                } else {
+                    echo 'EC2 instance is running and the application is healthy (HTTP 200).'
+                }
+            }
         }
 
         failure {
-            echo 'Failed to start the EC2 instance. Check the console output.'
+            echo 'Failed: the EC2 instance did not start or the application did not become healthy. Check the console output.'
         }
     }
 }
