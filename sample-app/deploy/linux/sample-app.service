@@ -1,7 +1,13 @@
 [Unit]
 Description=Sample Flask application (EC2 start utility test app)
+# The app must never run without its database:
+#  - Requires/After: start MariaDB first; stopping MariaDB stops the app.
+#  - ExecStartPre --check-db: refuse to start if the database is unreachable.
+Requires=mariadb.service
+After=network-online.target mariadb.service
 Wants=network-online.target
-After=network-online.target
+# Keep retrying while the database is down instead of giving up.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -9,7 +15,9 @@ User=sampleapp
 Group=sampleapp
 WorkingDirectory=/opt/sample-app
 EnvironmentFile=/etc/sample-app/sample-app.env
-ExecStart=/opt/sample-app/venv/bin/gunicorn --bind 0.0.0.0:${APP_PORT} --workers 2 --access-logfile - app:app
+ExecStartPre=/opt/sample-app/venv/bin/python /opt/sample-app/app.py --check-db
+ExecStart=/opt/sample-app/venv/bin/gunicorn --bind 0.0.0.0:${APP_PORT} --workers 2 --preload --access-logfile - "app:create_app()"
+TimeoutStartSec=120
 # Allows binding to ports below 1024 (e.g. 80) without running as root.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -17,4 +25,5 @@ Restart=always
 RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+# mariadb.service: starting the database again also starts the app.
+WantedBy=multi-user.target mariadb.service

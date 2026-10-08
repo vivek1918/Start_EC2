@@ -78,14 +78,34 @@ scp -i C:\path\to\key.pem -r sample-app ec2-user@<PUBLIC_IP>:~/
 ssh -i C:\path\to\key.pem ec2-user@<PUBLIC_IP> "sudo bash ~/sample-app/deploy/linux/install.sh 80"
 ```
 
-The installer installs Python if needed, puts the app in `/opt/sample-app` (virtualenv + gunicorn), writes the port to `/etc/sample-app/sample-app.env`, enables the `sample-app` systemd service at boot, starts it, and verifies `http://127.0.0.1:<port>/health` locally. Re-run it to update the app or change the port.
+The installer:
+
+- installs Python and **MariaDB** (MySQL-compatible) if needed, binds MariaDB to `127.0.0.1`, and enables it at boot;
+- creates database `sampleapp` and user `sampleapp` with a random password (kept on re-runs);
+- puts the app in `/opt/sample-app` (virtualenv + gunicorn) and writes port + DB settings to `/etc/sample-app/sample-app.env` (mode `0600`, root only);
+- enables the `sample-app` systemd service at boot, starts it, and verifies `http://127.0.0.1:<port>/health` locally.
+
+Re-run it to update the app or change the port.
+
+**The app never runs without its database:**
+
+| Layer | Behaviour |
+| --- | --- |
+| systemd `Requires=`/`After=mariadb.service` | App starts after MariaDB; `systemctl stop mariadb` also stops the app; starting MariaDB starts the app again |
+| `ExecStartPre=app.py --check-db` | Waits up to `DB_WAIT_TIMEOUT` (60s) for the DB; if unreachable the app is not started and systemd retries every 5s |
+| gunicorn `--preload "app:create_app()"` | App creation needs the DB (creates the `visits` table); fails if unreachable |
+| `GET /health` | Runs a DB query: `200 {"status":"UP","database":"UP"}`, or `503 {"status":"DOWN","database":"DOWN"}` → Jenkins fails |
+
+`GET /` writes a row to the `visits` table and returns the visit count, showing real reads/writes.
 
 Useful commands on the instance:
 
 ```bash
-systemctl status sample-app
+systemctl status sample-app mariadb
 journalctl -u sample-app -f
 curl http://127.0.0.1/health
+sudo systemctl stop mariadb      # app stops too; /health unreachable
+sudo systemctl start mariadb     # app starts again automatically
 ```
 
 4. **Verify auto-start:** stop the instance in the AWS console, then run the Jenkins job (or the script). It should start EC2 and pass the health check without anyone logging in to start the app.
