@@ -578,15 +578,18 @@ def build_health_url(
 
 def check_health_once(url: str, request_timeout: float) -> tuple[bool, str]:
     """
-    Make a single health request. Returns (healthy, description).
+    Make a single health request. Returns (healthy, description), where
+    the description includes the status code and the start of the body.
     """
 
     try:
         with urllib.request.urlopen(url, timeout=request_timeout) as response:
             status = response.getcode()
+            body = read_body_snippet(response)
 
     except urllib.error.HTTPError as exc:
-        return False, f"HTTP {exc.code}"
+        body = read_body_snippet(exc)
+        return False, f"HTTP {exc.code}" + (f" {body}" if body else "")
 
     except urllib.error.URLError as exc:
         return False, str(exc.reason)
@@ -594,10 +597,23 @@ def check_health_once(url: str, request_timeout: float) -> tuple[bool, str]:
     except (OSError, ValueError) as exc:
         return False, str(exc) or exc.__class__.__name__
 
-    if status == 200:
-        return True, "HTTP 200"
+    detail = f"HTTP {status}" + (f" {body}" if body else "")
 
-    return False, f"HTTP {status}"
+    return status == 200, detail
+
+
+def read_body_snippet(response: Any, limit: int = 200) -> str:
+    """
+    First part of a health response body, on one line, for logging
+    (e.g. {"status":"UP","database":"UP"}).
+    """
+
+    try:
+        raw = response.read(limit)
+    except (OSError, ValueError):
+        return ""
+
+    return " ".join(raw.decode("utf-8", errors="replace").split())
 
 
 def build_health_urls(
