@@ -29,6 +29,8 @@ After EC2 reports `running`, the script polls the application:
 
 The health URL keeps the scheme, host, and port of `APP_URL_OR_IP` (`https://app.example.com:8443` → `https://app.example.com:8443/health`, `203.0.113.10` → `http://203.0.113.10/health`). With `--instance-id`, the instance's public IP is used.
 
+If `APP_URL_OR_IP` is a **private IP** and the instance also has a public IP, each attempt tries the private IP first and then the public IP. A private IP is only reachable from inside the VPC (e.g. Jenkins running in AWS), so Jenkins outside AWS passes via the public IP. An instance with only a private IP must be checked from inside the VPC.
+
 The script does **not** start the application itself. The application must start on its own when the instance boots, using whatever mechanism its OS provides (systemd on Linux; e.g. a Windows service on Windows). That keeps the script and Jenkins job OS-independent: no OS parameter is needed.
 
 `DRY_RUN` prints the planned actions (start, wait, which health URL would be polled) and exits without starting EC2 or calling the health endpoint.

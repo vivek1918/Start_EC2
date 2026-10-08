@@ -600,12 +600,57 @@ def check_health_once(url: str, request_timeout: float) -> tuple[bool, str]:
     return False, f"HTTP {status}"
 
 
-def wait_for_app_health(url: str, timeout: int, interval: int) -> None:
+def build_health_urls(
+    target: str | None,
+    instance: dict[str, Any],
+    health_path: str,
+    health_port: int | None,
+) -> list[str]:
     """
-    Poll the health URL until it returns HTTP 200 or the timeout expires.
+    Health URLs to try, in order.
+
+    The first is always <APP_URL_OR_IP>/health. When APP_URL_OR_IP is a
+    private IP and the instance also has a public IP, the same URL on the
+    public IP is added as a fallback: the private IP is only reachable
+    from inside the VPC, the public IP from outside it.
     """
 
-    print(f"Health check: {url}")
+    primary = build_health_url(target, instance, health_path, health_port)
+
+    if not primary:
+        return []
+
+    parsed = urlparse(primary)
+    host = parsed.hostname or ""
+    public_ip = instance.get("PublicIpAddress")
+
+    if (
+        public_ip
+        and host != public_ip
+        and IPV4_PATTERN.match(host)
+        and ipaddress.ip_address(host).is_private
+    ):
+        netloc = f"{public_ip}:{parsed.port}" if parsed.port else public_ip
+        return [primary, parsed._replace(netloc=netloc).geturl()]
+
+    return [primary]
+
+
+def wait_for_app_health(urls: list[str], timeout: int, interval: int) -> str:
+    """
+    Poll the health URLs until one returns HTTP 200 or the timeout expires.
+
+    Each attempt tries every URL in order. Returns the URL that succeeded.
+    """
+
+    print(f"Health check: {urls[0]}")
+
+    for fallback in urls[1:]:
+        print(
+            f"Fallback:     {fallback} (private IP is only reachable "
+            "from inside the VPC)"
+        )
+
     print(f"Timeout: {timeout}s, retry interval: {interval}s")
 
     deadline = time.monotonic() + timeout
@@ -613,25 +658,35 @@ def wait_for_app_health(url: str, timeout: int, interval: int) -> None:
 
     while True:
         attempt += 1
+        failures = []
 
-        healthy, detail = check_health_once(
-            url,
-            request_timeout=min(interval, 10),
-        )
+        for url in urls:
+            healthy, detail = check_health_once(
+                url,
+                request_timeout=min(interval, 5),
+            )
 
-        if healthy:
-            print(f"Attempt {attempt}: {detail}")
-            return
+            if healthy:
+                print(f"Attempt {attempt}: {detail} from {url}")
+                return url
 
-        print(f"Attempt {attempt}: Application not ready ({detail})")
+            failures.append(
+                f"{urlparse(url).hostname}: {detail}"
+                if len(urls) > 1
+                else detail
+            )
+
+        summary = "; ".join(failures)
+
+        print(f"Attempt {attempt}: Application not ready ({summary})")
 
         remaining = deadline - time.monotonic()
 
         if remaining <= 0:
             raise RuntimeError(
                 f"Application did not become healthy within {timeout}s. "
-                f"{url} last returned: {detail}. The EC2 instance is "
-                "running, but the application is not. Check that the "
+                f"Last result: {summary}. The EC2 instance is running, "
+                "but the application is not reachable. Check that the "
                 "application service is enabled at boot and that the "
                 "security group allows the health check port."
             )
@@ -763,11 +818,13 @@ def start_instance(
         # ---------------------------------------------------------
 
         if dry_run:
-            planned_url = build_health_url(
-                target,
-                instance,
-                health_path,
-                health_port,
+            planned_url = " then ".join(
+                build_health_urls(
+                    target,
+                    instance,
+                    health_path,
+                    health_port,
+                )
             ) or f"http://<instance IP>{health_path}"
 
             print("")
@@ -944,14 +1001,14 @@ def start_instance(
         # Wait for the application (EC2 running != app running)
         # ---------------------------------------------------------
 
-        health_url = build_health_url(
+        health_urls = build_health_urls(
             target,
             instance,
             health_path,
             health_port,
         )
 
-        if not health_url:
+        if not health_urls:
             raise RuntimeError(
                 f"Instance {resolved_id} has no IP address to run the "
                 "application health check against."
@@ -961,7 +1018,7 @@ def start_instance(
         print("Waiting for application to become available...")
 
         wait_for_app_health(
-            health_url,
+            health_urls,
             timeout=health_timeout,
             interval=health_interval,
         )
