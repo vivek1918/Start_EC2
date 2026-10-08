@@ -15,6 +15,7 @@ App teams do **not** need the instance ID if the URL/IP resolves to that instanc
 | `requirements.txt` | Python library (`boto3`) |
 | `sample-app/` | Small Flask test app with `GET /health` → `{"status": "UP"}` |
 | `sample-app/deploy/linux/` | systemd unit + installer so the app starts on every boot |
+| `scripts/ssm-run.ps1` | Run a command on the instance through Systems Manager (no SSH) |
 
 ## Application health check
 
@@ -37,11 +38,39 @@ The script does **not** start the application itself. The application must start
 
 ## Sample application (Linux, systemd)
 
+### Standard access setup
+
+| Purpose | How | Security group inbound rule |
+| --- | --- | --- |
+| Health check (Jenkins/script) | HTTP to `/health` | **HTTP, TCP 80, Anywhere-IPv4** (`0.0.0.0/0`) |
+| Admin commands on the instance | AWS Systems Manager (no SSH) | **none** (no port 22, no 443) |
+
+Systems Manager connects outbound from the instance, so no inbound admin port or IP allow-list is needed and nothing breaks when your internet IP changes.
+
+One-time Systems Manager setup:
+
+1. **IAM → Roles → Create role** → trusted entity **AWS service / EC2** → attach policy **`AmazonSSMManagedInstanceCore`** → name it e.g. `ec2-ssm-role`.
+2. **EC2 → select instance → Actions → Security → Modify IAM role** → choose `ec2-ssm-role` → **Update**.
+3. Wait 2–5 minutes, then check **Systems Manager → Fleet Manager**: the instance should show **Online**. (Amazon Linux 2023 and Ubuntu AMIs already include the SSM agent.)
+4. Run commands from PowerShell (needs `aws login`):
+
+```powershell
+.\scripts\ssm-run.ps1 -InstanceId i-0da98ca5ffe3a0edf -Command "sudo systemctl is-active sample-app"
+.\scripts\ssm-run.ps1 -InstanceId i-0da98ca5ffe3a0edf -Command "sudo systemctl stop sample-app"
+.\scripts\ssm-run.ps1 -InstanceId i-0da98ca5ffe3a0edf -Command "sudo journalctl -u sample-app -n 50 --no-pager"
+```
+
+   For an interactive shell, use **EC2 → Connect → Session Manager** in the console.
+
+5. Once SSM works, **delete the SSH (22) and HTTPS (443) inbound rules**.
+
+### Installing the sample app
+
 One-time setup on the test instance:
 
-1. **Security group:** allow inbound TCP **80** (or your chosen port) from the machine running Jenkins/the script.
+1. **Security group:** see the standard above (HTTP 80 inbound).
 2. **Elastic IP (recommended):** auto-assigned public IPs change on stop/start; an Elastic IP keeps `APP_URL_OR_IP` stable.
-3. **Copy and install** (from PowerShell on your PC; user is `ec2-user` on Amazon Linux, `ubuntu` on Ubuntu):
+3. **Copy and install** (from PowerShell on your PC; user is `ec2-user` on Amazon Linux, `ubuntu` on Ubuntu). This initial copy uses SSH, so it needs a temporary SSH rule from **My IP**; remove it afterwards:
 
 ```powershell
 cd c:\workspace\devops\ec2-start-utility
