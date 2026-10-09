@@ -41,7 +41,8 @@ random_secret() {
 }
 
 env_value() {
-    sed -n "s/^$1=//p" "$2" 2>/dev/null | head -1
+    [[ -f "$2" ]] || return 0
+    sed -n "s/^$1=//p" "$2" | head -1
 }
 
 # ---------------------------------------------------------------------------
@@ -170,7 +171,7 @@ systemctl enable docker.service scf-infra.service scf-core.service
 
 log "Starting infrastructure (waits until MySQL, Redis and RabbitMQ are healthy)"
 systemctl restart scf-infra.service
-docker compose -f "${INSTALL_DIR}/docker-compose.infra.yml" ps
+docker compose --env-file "${INFRA_ENV}" -f "${INSTALL_DIR}/docker-compose.infra.yml" ps
 
 log "Starting scf-core (dependency check first)"
 systemctl restart scf-core.service
