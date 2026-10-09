@@ -1,0 +1,18 @@
+[Unit]
+Description=SCF infrastructure: MySQL, Redis, RabbitMQ (Docker containers)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/scf-core
+EnvironmentFile=/etc/scf-core/infra.env
+# --wait blocks until every container's healthcheck reports healthy.
+ExecStart=/usr/bin/docker compose -f /opt/scf-core/docker-compose.infra.yml up -d --wait --wait-timeout 300
+ExecStop=/usr/bin/docker compose -f /opt/scf-core/docker-compose.infra.yml stop
+TimeoutStartSec=330
+
+[Install]
+WantedBy=multi-user.target

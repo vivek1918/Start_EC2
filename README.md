@@ -21,12 +21,14 @@ App teams do **not** need the instance ID if the URL/IP resolves to that instanc
 
 After EC2 reports `running`, the script polls the application:
 
-| Setting | CLI flag | Jenkins (`environment` block) | Default |
+| Setting | CLI flag | Jenkins | Default |
 | --- | --- | --- | --- |
-| Path | `--health-path` | `HEALTH_PATH` | `/health` |
-| Timeout (seconds) | `--health-timeout` | `HEALTH_TIMEOUT` | `300` |
-| Retry interval (seconds) | `--health-interval` | `HEALTH_INTERVAL` | `10` |
-| Port | `--health-port` | not set | port in the URL, else 80/443 |
+| Path | `--health-path` | parameter `HEALTH_PATH` | `/health` |
+| Port | `--health-port` | parameter `HEALTH_PORT` | port in the URL, else 80/443 |
+| Timeout (seconds) | `--health-timeout` | parameter `HEALTH_TIMEOUT` | `300` CLI, `600` Jenkins |
+| Retry interval (seconds) | `--health-interval` | `environment` `HEALTH_INTERVAL` | `10` |
+
+If the health response lists dependencies (Spring Boot `/actuator/health` `components`, or flat JSON like `{"database": "UP"}`), the log prints each one, e.g. `[UP] MySQL database (db)`, `[DOWN] RabbitMQ (rabbit)`. On failure, the error names the dependencies that are not connected.
 
 The health URL keeps the scheme, host, and port of `APP_URL_OR_IP` (`https://app.example.com:8443` → `https://app.example.com:8443/health`, `203.0.113.10` → `http://203.0.113.10/health`). With `--instance-id`, the instance's public IP is used.
 
@@ -109,6 +111,56 @@ sudo systemctl start mariadb     # app starts again automatically
 ```
 
 4. **Verify auto-start:** stop the instance in the AWS console, then run the Jenkins job (or the script). It should start EC2 and pass the health check without anyone logging in to start the app.
+
+## core-backend (scf-core) on a single instance
+
+`deployments/core-backend/` runs the Spring Boot `scf-core` service (repo `veefin/core-backend`) with MySQL, Redis and RabbitMQ on the same instance, all in Docker, with the `local` Spring profile.
+
+Startup order on boot, enforced by systemd:
+
+| Step | Unit / check | If it fails |
+| --- | --- | --- |
+| 1 | `docker.service` | nothing else starts |
+| 2 | `scf-infra.service`: `docker compose up --wait` for `scf-mysql`, `scf-redis`, `scf-rabbitmq` (healthchecks) | unit fails; `scf-core` is not started |
+| 3 | `scf-core.service` `ExecStartPre=check-dependencies.sh`: Docker, MySQL (`scf_core`, `scf_core_history`), Redis `PONG`, RabbitMQ port | logs `scf-core will NOT be started`; systemd retries every 10s |
+| 4 | `docker run scf-core:current` (host network, port 8082) | restarts automatically |
+| 5 | `/actuator/health` (`db`, `redis`, `rabbit` components) | Jenkins fails and names the DOWN dependency |
+
+Infrastructure ports are bound to `127.0.0.1` only; only 8082 needs a security group rule.
+
+### Deploy
+
+1. **Build the image on your PC** (needs the Veefin Maven repo; the instance does not):
+
+```powershell
+cd C:\workspace\core-backend
+docker build --platform linux/amd64 -t scf-core:local .
+docker save -o $env:TEMP\scf-core-image.tar scf-core:local
+docker run --rm -v "${env:TEMP}:/t" -v "C:\workspace\devops\ec2-start-utility\deployments\core-backend:/d" bash:5 sh -c "gzip -c /t/scf-core-image.tar > /d/scf-core-image.tar.gz"
+```
+
+2. **Instance:** x86_64 (the image is `linux/amd64`), at least 4 GB RAM recommended (the installer adds 4 GB swap below ~7 GB RAM), 20 GB+ disk. Security group: **Custom TCP 8082, Anywhere-IPv4** for the health check, plus a temporary SSH rule from **My IP** for the copy.
+3. **Copy and install:**
+
+```powershell
+cd C:\workspace\devops\ec2-start-utility
+scp -i C:\path\to\key.pem -r deployments/core-backend ec2-user@<PUBLIC_IP>:~/
+ssh -i C:\path\to\key.pem ec2-user@<PUBLIC_IP> "sudo bash ~/core-backend/install.sh"
+```
+
+The installer installs Docker and the compose plugin if needed, generates the MySQL and RabbitMQ passwords into `/etc/scf-core/infra.env` (kept on re-runs), writes the app settings to `/etc/scf-core/scf-core.env` (both `0600`), loads the image, enables the units, and waits for `/actuator/health` to report `UP`. The first start runs all Flyway migrations (about 4 minutes); later starts take under a minute.
+
+4. **Jenkins:** `APP_URL_OR_IP` = the instance IP, `HEALTH_PATH` = `/actuator/health`, `HEALTH_PORT` = `8082`.
+
+Useful commands on the instance:
+
+```bash
+systemctl status scf-infra scf-core
+journalctl -u scf-core -b | grep dependency-check   # dependency gate log
+docker ps                                           # scf-mysql, scf-redis, scf-rabbitmq, scf-core
+curl -s http://127.0.0.1:8082/actuator/health
+sudo docker stop scf-rabbitmq                       # health -> 503, rabbit DOWN
+```
 
 ## If you have no AWS account or Jenkins yet
 

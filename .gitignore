@@ -17,6 +17,10 @@ practice-instance.local.env
 *credentials*
 .aws/
 
+# Docker image archives copied to instances
+*.tar
+*.tar.gz
+
 # Jenkins local Docker
 jenkins/repo-bare/
 

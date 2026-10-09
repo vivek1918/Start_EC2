@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import re
 import socket
 import sys
@@ -57,6 +58,20 @@ MANAGED_SERVICE_DNS_MARKERS = (
     ("s3-website", "an S3 static website"),
     ("lambda-url.", "a Lambda function URL"),
 )
+
+HEALTH_STATES = {"UP", "DOWN", "OUT_OF_SERVICE", "UNKNOWN"}
+
+# Display names for health components, in the order they are reported.
+COMPONENT_LABELS = {
+    "db": "MySQL database",
+    "database": "Database",
+    "redis": "Redis",
+    "rabbit": "RabbitMQ",
+    "diskSpace": "Disk space",
+    "ping": "Application ping",
+    "livenessState": "Liveness",
+    "readinessState": "Readiness",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -576,44 +591,106 @@ def build_health_url(
     return f"{scheme}://{netloc}{path}"
 
 
-def check_health_once(url: str, request_timeout: float) -> tuple[bool, str]:
+def check_health_once(
+    url: str,
+    request_timeout: float,
+) -> tuple[bool, str, dict[str, str]]:
     """
-    Make a single health request. Returns (healthy, description), where
-    the description includes the status code and the start of the body.
+    Make a single health request.
+
+    Returns (healthy, description, components). components maps each
+    dependency the application reports (e.g. db, redis, rabbit) to its
+    status; it is empty when the response has no such details.
     """
 
     try:
         with urllib.request.urlopen(url, timeout=request_timeout) as response:
             status = response.getcode()
-            body = read_body_snippet(response)
+            body = read_body(response)
 
     except urllib.error.HTTPError as exc:
-        body = read_body_snippet(exc)
-        return False, f"HTTP {exc.code}" + (f" {body}" if body else "")
+        status = exc.code
+        body = read_body(exc)
 
     except urllib.error.URLError as exc:
-        return False, str(exc.reason)
+        return False, str(exc.reason), {}
 
     except (OSError, ValueError) as exc:
-        return False, str(exc) or exc.__class__.__name__
+        return False, str(exc) or exc.__class__.__name__, {}
 
-    detail = f"HTTP {status}" + (f" {body}" if body else "")
+    components = health_components(body)
 
-    return status == 200, detail
+    if components:
+        not_up = [name for name, state in components.items() if state != "UP"]
+        detail = f"HTTP {status}, " + (
+            f"not UP: {', '.join(not_up)}" if not_up else "all components UP"
+        )
+    else:
+        snippet = " ".join(body[:200].split())
+        detail = f"HTTP {status}" + (f" {snippet}" if snippet else "")
+
+    return status == 200, detail, components
 
 
-def read_body_snippet(response: Any, limit: int = 200) -> str:
-    """
-    First part of a health response body, on one line, for logging
-    (e.g. {"status":"UP","database":"UP"}).
-    """
-
+def read_body(response: Any, limit: int = 65536) -> str:
     try:
         raw = response.read(limit)
     except (OSError, ValueError):
         return ""
 
-    return " ".join(raw.decode("utf-8", errors="replace").split())
+    return raw.decode("utf-8", errors="replace")
+
+
+def health_components(body: str) -> dict[str, str]:
+    """
+    Dependency statuses from a health response body.
+
+    Supports Spring Boot Actuator ({"status": ..., "components": {"db":
+    {"status": "UP"}, ...}}) and flat bodies ({"status": "UP",
+    "database": "UP"}).
+    """
+
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    components = data.get("components")
+
+    if isinstance(components, dict):
+        found = {
+            name: str(
+                value.get("status", "UNKNOWN")
+                if isinstance(value, dict)
+                else value
+            ).upper()
+            for name, value in components.items()
+        }
+    else:
+        found = {
+            name: value.upper()
+            for name, value in data.items()
+            if name != "status"
+            and isinstance(value, str)
+            and value.upper() in HEALTH_STATES
+        }
+
+    order = {name: index for index, name in enumerate(COMPONENT_LABELS)}
+
+    return dict(
+        sorted(found.items(), key=lambda item: order.get(item[0], len(order)))
+    )
+
+
+def print_component_report(components: dict[str, str]) -> None:
+    print("Dependency status reported by the application:")
+
+    for name, state in components.items():
+        label = COMPONENT_LABELS.get(name, name)
+        print(f"  [{state}] {label} ({name})")
 
 
 def build_health_urls(
@@ -671,19 +748,31 @@ def wait_for_app_health(urls: list[str], timeout: int, interval: int) -> str:
 
     deadline = time.monotonic() + timeout
     attempt = 0
+    last_components: dict[str, str] = {}
 
     while True:
         attempt += 1
         failures = []
 
         for url in urls:
-            healthy, detail = check_health_once(
+            healthy, detail, components = check_health_once(
                 url,
-                request_timeout=min(interval, 5),
+                request_timeout=min(interval, 10),
             )
+
+            if components:
+                last_components = components
 
             if healthy:
                 print(f"Attempt {attempt}: {detail} from {url}")
+
+                if components:
+                    print("")
+                    print_component_report(components)
+
+                    if all(state == "UP" for state in components.values()):
+                        print("All dependencies are connected.")
+
                 return url
 
             failures.append(
@@ -699,12 +788,32 @@ def wait_for_app_health(urls: list[str], timeout: int, interval: int) -> str:
         remaining = deadline - time.monotonic()
 
         if remaining <= 0:
+            not_up = [
+                COMPONENT_LABELS.get(name, name)
+                for name, state in last_components.items()
+                if state != "UP"
+            ]
+
+            if last_components:
+                print("")
+                print_component_report(last_components)
+
+            if not_up:
+                reason = (
+                    "The application is responding, but these dependencies "
+                    f"are not connected: {', '.join(not_up)}."
+                )
+            else:
+                reason = (
+                    "The application is not reachable. Check that the "
+                    "application service is enabled at boot and that the "
+                    "security group allows the health check port."
+                )
+
             raise RuntimeError(
                 f"Application did not become healthy within {timeout}s. "
-                f"Last result: {summary}. The EC2 instance is running, "
-                "but the application is not reachable. Check that the "
-                "application service is enabled at boot and that the "
-                "security group allows the health check port."
+                f"Last result: {summary}. The EC2 instance is running. "
+                f"{reason}"
             )
 
         time.sleep(min(interval, remaining))

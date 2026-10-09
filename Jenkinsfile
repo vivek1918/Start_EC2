@@ -8,6 +8,24 @@ pipeline {
             description: 'Enter the application URL or IPv4 address'
         )
 
+        string(
+            name: 'HEALTH_PATH',
+            defaultValue: '/health',
+            description: 'Application health endpoint. sample-app: /health, core-backend (Spring Boot): /actuator/health'
+        )
+
+        string(
+            name: 'HEALTH_PORT',
+            defaultValue: '',
+            description: 'Health check port. Empty = port in APP_URL_OR_IP, else 80. core-backend: 8082'
+        )
+
+        string(
+            name: 'HEALTH_TIMEOUT',
+            defaultValue: '600',
+            description: 'Seconds to wait for the application (and its dependencies) to report healthy'
+        )
+
         booleanParam(
             name: 'DRY_RUN',
             defaultValue: false,
@@ -25,10 +43,7 @@ pipeline {
         PYTHONUNBUFFERED = '1'
         AWS_DEFAULT_REGION = 'ap-southeast-2'
 
-        // Application health check: success requires HTTP 200 from
-        // http://<APP_URL_OR_IP><HEALTH_PATH> before HEALTH_TIMEOUT seconds.
-        HEALTH_PATH = '/health'
-        HEALTH_TIMEOUT = '300'
+        // Success requires HTTP 200 from http://<APP_URL_OR_IP>[:HEALTH_PORT]<HEALTH_PATH>.
         HEALTH_INTERVAL = '10'
     }
 
@@ -44,8 +59,15 @@ pipeline {
                     echo "Application URL/IP: ${params.APP_URL_OR_IP}"
                     echo "AWS Region: ${env.AWS_DEFAULT_REGION}"
                     echo "Dry Run: ${params.DRY_RUN}"
-                    echo "Health check: ${env.HEALTH_PATH} (timeout ${env.HEALTH_TIMEOUT}s, every ${env.HEALTH_INTERVAL}s)"
-                }
+                    if (params.HEALTH_PORT?.trim() && !(params.HEALTH_PORT.trim() ==~ /\d{1,5}/)) {
+                        error('HEALTH_PORT must be a number, e.g. 8082, or empty.')
+                    }
+
+                    if (!(params.HEALTH_TIMEOUT?.trim() ==~ /\d+/)) {
+                        error('HEALTH_TIMEOUT must be a number of seconds.')
+                    }
+
+                    echo "Health check: ${params.HEALTH_PATH} port ${params.HEALTH_PORT?.trim() ?: 'default'} (timeout ${params.HEALTH_TIMEOUT}s, every ${env.HEALTH_INTERVAL}s)"                }
             }
         }
 
@@ -66,10 +88,14 @@ pipeline {
 
                         pip install -q -r requirements.txt
 
-                        DRY_FLAG=""
+                        EXTRA_FLAGS=""
 
                         if [ "${DRY_RUN}" = "true" ]; then
-                            DRY_FLAG="--dry-run"
+                            EXTRA_FLAGS="--dry-run"
+                        fi
+
+                        if [ -n "${HEALTH_PORT// /}" ]; then
+                            EXTRA_FLAGS="${EXTRA_FLAGS} --health-port ${HEALTH_PORT// /}"
                         fi
 
                         python start_ec2_instance.py \
@@ -77,7 +103,7 @@ pipeline {
                             --health-path "${HEALTH_PATH}" \
                             --health-timeout "${HEALTH_TIMEOUT}" \
                             --health-interval "${HEALTH_INTERVAL}" \
-                            ${DRY_FLAG}
+                            ${EXTRA_FLAGS}
                     '''
                 }
             }
@@ -90,7 +116,7 @@ pipeline {
                 if (params.DRY_RUN) {
                     echo 'Dry run completed. No EC2 or application changes were made.'
                 } else {
-                    echo 'EC2 instance is running and the application is healthy (HTTP 200).'
+                    echo 'EC2 instance is running, dependencies are connected, and the application is healthy (HTTP 200).'
                 }
             }
         }

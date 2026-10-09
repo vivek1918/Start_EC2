@@ -1,0 +1,23 @@
+[Unit]
+Description=SCF Core backend (Docker container)
+# Never run without Docker and the infrastructure containers:
+#  - Requires/After: start Docker and scf-infra first; stopping either stops the app.
+#  - ExecStartPre check-dependencies.sh: refuse to start until MySQL, Redis and
+#    RabbitMQ actually answer.
+Requires=docker.service scf-infra.service
+After=docker.service scf-infra.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/scf-core/infra.env
+ExecStartPre=/opt/scf-core/check-dependencies.sh
+ExecStartPre=-/usr/bin/docker rm -f scf-core
+ExecStart=/usr/bin/docker run --rm --name scf-core --network host --env-file /etc/scf-core/scf-core.env scf-core:current
+ExecStop=/usr/bin/docker stop -t 30 scf-core
+TimeoutStartSec=300
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
